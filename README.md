@@ -1,0 +1,2 @@
+# anti-freeze-system-RD-ESP8266-B
+  Project is made for Summer Houses wich are left without hitting during winter.   With the help of this system it is possible to control many electric heaters in house   via Internet. It is possible to set MIN/MAX temp and (eg 2-4 Celsius) to prevent water in   main heating system to frie and damage it.    Additionaly, temperature can be changed to bigger value if someone want to visit house during   winter season (heating house after arrival can take several hours).
