@@ -187,6 +187,11 @@ void setup()
   timer.setInterval(200, irTimer); //  timer for IR routine. 
   timer.setInterval(500, blynkTimer);
   timer.setInterval(1000, tempTimer);
+
+  Serial.println("ModemSleep");
+  wifi_set_sleep_type(MODEM_SLEEP_T);
+  Serial.println("delay 5s");
+  delay(5000);
 }
 
 void loop()
@@ -205,6 +210,8 @@ void loop()
   if(doTempRun) { doTempRun = false; tempRun();}
   if(doBlynkRun) { doBlynkRun = false; blynkRun();}
   
+  Serial.println("delay 5s");
+  delay(5000);
   //ToDo - check proper way to reduce power consumption (overheating module).
   //wifi_set_sleep_type(MODEM_SLEEP_T);
 }
