@@ -12,20 +12,43 @@
   https://github.com/esp8266/Arduino/blob/master/variants/d1_mini/pins_arduino.h> 
 
   Project Pinout
-  | Arduino |ESP GPIO | Some other hardware |
-  |---------|---------|---------------------|
-  | D3      | GPIO0   | Relay               |
-  | D4      | GPIO2   | LED_BUILTIN         |
-  | D5      | GPIO14  | IR receiver         |
-  | A0      | A0      | LM35 temp sens      |
-  | Vcc     | Vcc     | Vcc                 |
-  | GND     | GND     | GND                 |
+  | Arduino |ESP GPIO | Some other hardware | BLYNK Virtual PIN |
+  |---------|---------|---------------------|-------------------|
+  | D3      | GPIO0   | Relay               | V0                |
+  | D4      | GPIO2   | LED_BUILTIN         |                   |
+  | D5      | GPIO14  | IR receiver         |                   |
+  |       D0 configured for DEEP_SLEEP      |                   |
+  |               END HW RESET.             |                   |
+  | D0      | GPIO16  | short with HW RESET |                   |
+  | A0      | A0      | LM35 temp sens      | V5                |
+  | Vcc     | Vcc     | Vcc                 |                   |
+  | GND     | GND     | GND                 |                   |
+  |         |         | TempMIN             | V3                |
+  |         |         | TempMAX             | V4                |
+  |---------|---------|---------------------|-------------------|
+
+  Parameters Flow
+  |    TRANSMITER    |   DIR    |   SERVER    | DIR |      RECEIVER      |
+  |------------------|----------|-------------|-----|--------------------|
+  |WeMos virtualWrite|(PUSH) => | V0, V3, V4  | =>  | APP                |
+  |               APP|(PUSH) => | V0, V3, V4  | =>  | BLYNK_WRITE  WeMos |
+  |WeMos virtualWrite|(PUSH) => |     V5      | =>  | APP                |
+  |               APP|(PUSH) => |    V127     | =>  | BLYNK_WRITE  WeMos |
+  |------------------|----------|-------------|-----|--------------------|
+
+  Remote controler
+  PLAYPAUSE => ON/OFF relay
   
   Created 24 May 2018
   By Marcin Postek
   https://github.com/kalvis84/anti-freeze-system-RD-ESP8266-B
   Change log
-  * version 0.1
+  * version 0.2 2018-05-30
+    + full functionality.
+    + blue led connected in fw with relay pin.
+    + min max values for temp.
+    - remove blue led control by remote.
+  * version 0.1 2018-05-30
     + initial release
   License
   MIT License
@@ -71,10 +94,6 @@
 #include <IRrecv.h>
 #include <IRutils.h>
 
-//LED_BLUE is pulled up to VCC. O = ON.
-#define LED_BLUE_OFF 1
-#define LED_BLUE_ON 0
-
 // ToDo - sleep scenarious have to be cheched. This configuration does not work
 // LIGHT_SLEEP_T stops CPU and MODEM_SLEEP_T don't lover current consumption.
 // Required for LIGHT_SLEEP_T delay mode
@@ -84,37 +103,39 @@ extern "C" {
 
 #include "ir_arkas_remote.h"
 
-// An IR detector/demodulator is connected to GPIO pin 14(D5 on a WeMos D1 mini board).
+//LED_BLUE is pulled up to VCC. O = ON.
+#define LED_BLUE_OFF 1
+#define LED_BLUE_ON 0
+
+uint16_t RELAY_PIN = 0;  //GPIO0
+uint16_t LEDBLUE_PIN  = 2; //GPIO2
 uint16_t RECV_PIN = 14;
+
+// An IR detector/demodulator is connected to GPIO pin 14(D5 on a WeMos D1 mini board).
 IRrecv irrecv(RECV_PIN);
+
+//Blynk widgets
+WidgetLCD lcd(V0);
+BlynkTimer timer; // Create a Timer object called "timer"! 
+
+//Default values for WifiManager additioanl parameters.
+//define your default values here, if there are different values in config.json, they are overwritten.
+//char mqtt_server[40];
+//char mqtt_port[6] = "8080";
+char temp_min[5] = "11.1";
+char temp_max[5] = "22.2";
+char blynk_token[34] = "YOUR_BLYNK_TOKEN";
 
 //float adc_factor = 1.0; //uncomment to calibrate. 
 //    adc_factor = measured voltage on A0 / value from terminal
 float adc_factor = 645.0 / 220.0; //comment for callibraton
 float celsius = 0;
-
-uint16_t RELAY_PIN = 0;  //GPIO0
-uint16_t LEDBLUE_PIN  = 2; //GPIO2
-
-//define your default values here, if there are different values in config.json, they are overwritten.
-//char mqtt_server[40];
-//char mqtt_port[6] = "8080";
-char blynk_token[34] = "YOUR_BLYNK_TOKEN";
+float tempMin = 25;
+float tempMax = 30;
 
 //flag for saving data
 bool shouldSaveConfig = false;
-
-// Your WiFi credentials.
-// Set password to "" for open networks.
-//char ssid[] = "Airbox-12BF";
-//char pass[] = "72392900";
-
-// You should get Auth Token in the Blynk App.
-// Go to the Project Settings (nut icon).
-//char auth[] = "33f5bc4798794609bee02c0a0178975e";
-
-WidgetLCD lcd(V0);
-BlynkTimer timer; // Create a Timer object called "timer"! 
+bool shouldUpdateVirtualsOnBlynk = false;
 
 //flags for timmers
 bool doCredentialsReset = false;
@@ -150,14 +171,11 @@ void setup()
 
   pinMode(RELAY_PIN, OUTPUT);
   pinMode(LEDBLUE_PIN, OUTPUT);
-  
+  digitalWrite(RELAY_PIN, 0);
+  digitalWrite(LEDBLUE_PIN, LED_BLUE_OFF);
+    
   readConfig();
-
   connectWifi();
-
-  if (shouldSaveConfig) {
-    saveConfig();
-  }
     
   irrecv.enableIRIn();  // Start the receiver
   Serial.printf("\nIRrecvDemo is now running and waiting for IR message on Pin %d", RECV_PIN);
@@ -175,14 +193,20 @@ void loop()
 {
   timer.run(); // BlynkTimer is working...
 
+  if (shouldSaveConfig) {
+    shouldSaveConfig = false;
+    saveConfig();
+  }
   /* if something wron, reset credential and go back to WiFiManager HTTPserver.*/
   if(doCredentialsReset) { doCredentialsReset = false; CredentialsReset();}
 
+  //Main routines. Frequency configured in setup.
   if(doIrRun) { doIrRun = false; irRun();}
   if(doTempRun) { doTempRun = false; tempRun();}
   if(doBlynkRun) { doBlynkRun = false; blynkRun();}
+  
   //ToDo - check proper way to reduce power consumption (overheating module).
-//  wifi_set_sleep_type(MODEM_SLEEP_T);
+  //wifi_set_sleep_type(MODEM_SLEEP_T);
 }
 
 void irRun(void)
@@ -214,18 +238,12 @@ void irRun(void)
         Serial.print("PLAYPAUSE");
         if(digitalRead(RELAY_PIN)){
           digitalWrite(RELAY_PIN, 0);
+          digitalWrite(LEDBLUE_PIN, LED_BLUE_OFF);
         }
         else{
           digitalWrite(RELAY_PIN, 1);
+          digitalWrite(LEDBLUE_PIN, LED_BLUE_ON);
         }
-        break;
-      case BACKW:
-        Serial.print("BACKW");
-        digitalWrite(LEDBLUE_PIN, 1);
-        break;
-      case FORW:
-        Serial.print("FORW");
-        digitalWrite(LEDBLUE_PIN, 0);
         break;
       default:
 //        if(irLastCommand > 0) blinkLEDBuildin(irLastCommand/20, 300, 300); //ToDo - remove. Only for blinking test.
@@ -247,22 +265,36 @@ void tempRun(void){
     Serial.print("milivolts=   ");
     Serial.println(millivolts);
   }
+
+  //do temperature regulation.
+  if(celsius > tempMax) {
+    digitalWrite(RELAY_PIN, 0);
+    digitalWrite(LEDBLUE_PIN, LED_BLUE_OFF);
+  }
+  else if(celsius < tempMin) {
+    digitalWrite(RELAY_PIN, 1);
+    digitalWrite(LEDBLUE_PIN, LED_BLUE_ON);
+  }
 }
 
 void blynkRun(void)
 {
   Blynk.run();
+  //ToDo - only if changed
   //update status LEDs in app
   if(digitalRead(RELAY_PIN)) Blynk.virtualWrite(V0, 1);
   else Blynk.virtualWrite(V0, 0);
-  if(digitalRead(LEDBLUE_PIN)) Blynk.virtualWrite(V2, 1);  
-  else  Blynk.virtualWrite(V2, 0);
   Blynk.virtualWrite(V5, celsius);
+  if(shouldUpdateVirtualsOnBlynk){
+    shouldUpdateVirtualsOnBlynk = false;
+    Blynk.virtualWrite(V3, tempMin);
+    Blynk.virtualWrite(V4, tempMax);
+  }
 }
 
 void readConfig(void){
     //clean FS, for testing
-  //SPIFFS.format();
+//  SPIFFS.format();
 
   //read configuration from FS json
   Serial.println("mounting FS...");
@@ -286,10 +318,9 @@ void readConfig(void){
         if (json.success()) {
           Serial.println("\nparsed json");
 
-//          strcpy(mqtt_server, json["mqtt_server"]);
-//          strcpy(mqtt_port, json["mqtt_port"]);
+          strcpy(temp_min, json["temp_min"]);
+          strcpy(temp_max, json["temp_max"]);
           strcpy(blynk_token, json["blynk_token"]);
-
         } else {
           Serial.println("failed to load json config");
         }
@@ -309,8 +340,8 @@ void connectWifi(){
   // The extra parameters to be configured (can be either global or just in the setup)
   // After connecting, parameter.getValue() will get you the configured value
   // id/name placeholder/prompt default length
-//  WiFiManagerParameter custom_mqtt_server("server", "mqtt server", mqtt_server, 40);
-//  WiFiManagerParameter custom_mqtt_port("port", "mqtt port", mqtt_port, 5);
+  WiFiManagerParameter custom_temp_min("tmin", "temp min", temp_min, 5);
+  WiFiManagerParameter custom_temp_max("tmax", "temp max", temp_max, 5);
   WiFiManagerParameter custom_blynk_token("blynk", "blynk token", blynk_token, 34);
 
   //WiFiManager
@@ -324,8 +355,8 @@ void connectWifi(){
  // wifiManager.setSTAStaticIPConfig(IPAddress(10,0,1,99), IPAddress(10,0,1,1), IPAddress(255,255,255,0));
   
   //add all your parameters here
-//  wifiManager.addParameter(&custom_mqtt_server);
-//  wifiManager.addParameter(&custom_mqtt_port);
+  wifiManager.addParameter(&custom_temp_min);
+  wifiManager.addParameter(&custom_temp_max);
   wifiManager.addParameter(&custom_blynk_token);
 
   //reset settings - for testing
@@ -356,9 +387,15 @@ void connectWifi(){
   Serial.println("connected...yeey :)");
 
   //read updated parameters
-//  strcpy(mqtt_server, custom_mqtt_server.getValue());
-//  strcpy(mqtt_port, custom_mqtt_port.getValue());
+  strcpy(temp_min, custom_temp_min.getValue());
+  strcpy(temp_max, custom_temp_max.getValue());
   strcpy(blynk_token, custom_blynk_token.getValue());
+
+  tempMin = strtod(temp_min, (char **)0);
+  tempMax = strtod(temp_max, (char **)0);
+  //ToDo - check if temp_min can have less letters than configured (5).
+  // once json was not saved when 14 and 25 values are put on configuration site.
+  shouldUpdateVirtualsOnBlynk = true;
 }
 
 //callback from WiFiManager - notifying us of the need to save config.
@@ -368,19 +405,19 @@ void saveConfigCallback () {
 }
 
 void saveConfig(void){
+  char buff[5];
   //save the custom parameters to FS
   Serial.println("saving config");
   DynamicJsonBuffer jsonBuffer;
   JsonObject& json = jsonBuffer.createObject();
-//  json["mqtt_server"] = mqtt_server;
-//  json["mqtt_port"] = mqtt_port;
+  json["temp_min"] = dtostrf(tempMin, 2, 1, buff);
+  json["temp_max"] = dtostrf(tempMax, 2, 1, buff);;
   json["blynk_token"] = blynk_token;
 
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
     Serial.println("failed to open config file for writing");
   }
-
   json.printTo(Serial);
   json.printTo(configFile);
   configFile.close();
@@ -393,8 +430,10 @@ void CredentialsReset(void)
     WiFiManager wifiManager;
     wifiManager.resetSettings();
     blinkLEDBuildin(5, 300, 300);
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
+    // Hardware reset.
+    digitalWrite(16, 0);  //GPIO16
+    pinMode(16, OUTPUT); //GPIO16  
+//    ESP.restart(); //software reset do not work correctly after flashing. #1017
     delay(5000);
 }
 
@@ -424,24 +463,39 @@ BLYNK_WRITE(V0)
   Serial.print("V0 is: ");
   Serial.println(pinValue);
   digitalWrite(RELAY_PIN, pinValue);
+  digitalWrite(LEDBLUE_PIN, !pinValue);
 }
 
 // This function will be called every time Slider Widget
-// in Blynk app writes values to the Virtual Pin 2
-BLYNK_WRITE(V2)
+// in Blynk app writes values to the Virtual Pin 3
+BLYNK_WRITE(V3)
 {
-  int pinValue = param.asInt(); // assigning incoming value from pin V1 to a variable
-  // You can also use:
-  // String i = param.asStr();
-  // double d = param.asDouble();
-  Serial.print("V2 is: ");
+  int pinValue = param.asInt(); // assigning incoming value from pin V3 to a variable
+  if(pinValue != tempMin){
+    tempMin = pinValue;
+    shouldSaveConfig = true;
+    Serial.println("tempMin updated.");
+  }
+  Serial.print("V3 is: ");
   Serial.println(pinValue);
-  digitalWrite(LEDBLUE_PIN, pinValue);
 }
 
 // This function will be called every time Slider Widget
-// in Blynk app writes values to the Virtual Pin 127
+// in Blynk app writes values to the Virtual Pin 4
+BLYNK_WRITE(V4)
+{
+  int pinValue = param.asInt(); // assigning incoming value from pin V4 to a variable
+  if(pinValue != tempMax){
+    tempMax = pinValue;
+    shouldSaveConfig = true;
+    Serial.println("tempMax updated.");
+  }
+  Serial.print("V4 is: ");
+  Serial.println(pinValue);
+}
+
 //CREDENTIAL RESET
+//hidden button in application. for test purpose.
 BLYNK_WRITE(V127)
 {
   doCredentialsReset = true;
