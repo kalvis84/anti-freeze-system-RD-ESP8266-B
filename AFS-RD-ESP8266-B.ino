@@ -19,8 +19,8 @@
   | D5      | GPIO14  | IR receiver         |                   |
   |       D0 configured for DEEP_SLEEP      |                   |
   |               END HW RESET.             |                   |
-  | D0      | GPIO16  | short with HW RESET |                   |
-  | A0      | A0      | LM35 temp sens      | V5                |
+  | D0      | GPIO16  | 470 Ohm to HW RESET |                   |
+  | D7      | GPIO13  | DS18B20             | V5                |
   | Vcc     | Vcc     | Vcc                 |                   |
   | GND     | GND     | GND                 |                   |
   |         |         | TempMIN             | V3                |
@@ -103,6 +103,25 @@ extern "C" {
 
 #include "ir_arkas_remote.h"
 
+/**********************************DS18B20******************/
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// Data wire is plugged into port 2 on the Arduino
+#define ONE_WIRE_BUS 13
+
+// Setup a oneWire instance to communicate with any OneWire devices (not just Maxim/Dallas temperature ICs)
+OneWire oneWire(ONE_WIRE_BUS);
+
+// Pass our oneWire reference to Dallas Temperature. 
+DallasTemperature sensors(&oneWire);
+
+// arrays to hold device address
+// DS18B20 water proof = { 0x28, 0xFF, 0x97, 0x59, 0x74, 0x15, 0x3, 0x65 }
+//DeviceAddress insideThermometer = { 0x28, 0xFF, 0x97, 0x59, 0x74, 0x15, 0x3, 0x65 };
+DeviceAddress insideThermometer;
+/**********************************END DS18B20******************/
+
 //LED_BLUE is pulled up to VCC. O = ON.
 #define LED_BLUE_OFF 1
 #define LED_BLUE_ON 0
@@ -126,9 +145,6 @@ char temp_min[5] = "11.1";
 char temp_max[5] = "22.2";
 char blynk_token[34] = "YOUR_BLYNK_TOKEN";
 
-//float adc_factor = 1.0; //uncomment to calibrate. 
-//    adc_factor = measured voltage on A0 / value from terminal
-float adc_factor = 645.0 / 220.0; //comment for callibraton
 float celsius = 0;
 float tempMin = 25;
 float tempMax = 30;
@@ -163,6 +179,7 @@ void CredentialsReset(void);
 void connectWifi(void);
 //blink LED tha way it is defined by: count, ton and toff. 
 void blinkLEDBuildin(int count, int ton, int toff);
+void printAddress(DeviceAddress deviceAddress);
 
 void setup()
 {
@@ -185,9 +202,46 @@ void setup()
     Serial.println("Blynk connection timed out.");
   } 
   timer.setInterval(200, irTimer); //  timer for IR routine. 
-  timer.setInterval(500, blynkTimer);
-  timer.setInterval(1000, tempTimer);
+  timer.setInterval(5000, blynkTimer);
+  timer.setInterval(5000, tempTimer);
 
+//*****************DS18B20 Setup******************************************
+  // locate devices on the bus
+  Serial.print("Locating devices...");
+  sensors.begin();
+  Serial.print("Found ");
+  int deviceCount = sensors.getDeviceCount();
+  Serial.print(deviceCount, DEC);
+  Serial.println(" devices.");
+
+  // report parasite power requirements
+  Serial.print("Parasite power is: "); 
+  if (sensors.isParasitePowerMode()) Serial.println("ON");
+  else Serial.println("OFF");
+
+//  if(insideThermometer == 0){
+    if (!sensors.getAddress(insideThermometer, 0)){
+      Serial.println("Unable to find address for Device 0");
+    }
+//  }  
+
+  // show the addresses we found on the bus
+  Serial.print("Device 0 Address: ");
+  printAddress(insideThermometer);
+  Serial.println();
+
+    // set the resolution to 9 bit (Each Dallas/Maxim device is capable of several different resolutions)
+  sensors.setResolution(insideThermometer, 9);
+  Serial.print("Device 0 Resolution: ");
+  int resolution = sensors.getResolution(insideThermometer);
+  Serial.print(resolution, DEC);
+  Serial.println();
+//*****************END - DS18B20 Setup******************************************
+
+  /* Setting sleep type to MODEM_SLEEP. This reduce power consumption
+   * 3-4 times and temperature off ESP8266 module.
+   * Module goes to sleep after yield() (it is in delay();
+   */ 
   Serial.println("ModemSleep");
   wifi_set_sleep_type(MODEM_SLEEP_T);
   Serial.println("delay 5s");
@@ -260,19 +314,25 @@ void irRun(void)
   }
 }
 
+/**************************DS18B20 print temp****************************/
 void tempRun(void){
-  int analogValue = analogRead(A0);
-  float millivolts = (analogValue/1024.0) * adc_factor * 1000; //3300 is the voltage provided by NodeMCU
   //  ToDo - take avg of 10.
-  celsius = millivolts/10;
-  Serial.print("in DegreeC=   ");
-  Serial.println(celsius);
-  //ToDo - add adc_factor to FS routine?
-  if(adc_factor == 1.0){
-    Serial.print("milivolts=   ");
-    Serial.println(millivolts);
-  }
 
+  // method 1 - slower
+  //Serial.print("Temp C: ");
+  //Serial.print(sensors.getTempC(deviceAddress));
+  //Serial.print(" Temp F: ");
+  //Serial.print(sensors.getTempF(deviceAddress)); // Makes a second call to getTempC and then converts to Fahrenheit
+
+  // method 2 - faster
+  Serial.print("Requesting temperatures...");
+  sensors.requestTemperatures(); // Send the command to get temperatures
+  Serial.println("DONE");
+  celsius = sensors.getTempC(insideThermometer);
+  celsius -= 5; //ToDo - Remove. It is temporary because of soldering DS near wifi module.
+  Serial.print("Temp C: ");
+  Serial.println(celsius);
+  
   //do temperature regulation.
   if(celsius > tempMax) {
     digitalWrite(RELAY_PIN, 0);
@@ -283,6 +343,17 @@ void tempRun(void){
     digitalWrite(LEDBLUE_PIN, LED_BLUE_ON);
   }
 }
+
+// function to print a device address
+void printAddress(DeviceAddress deviceAddress)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    if (deviceAddress[i] < 16) Serial.print("0");
+    Serial.print(deviceAddress[i], HEX);
+  }
+}
+/**************************************************************************/
 
 void blynkRun(void)
 {
