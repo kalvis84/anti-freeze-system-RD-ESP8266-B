@@ -18,7 +18,7 @@
   | D4      | GPIO2   | LED_BUILTIN         |                   |
   | D5      | GPIO14  | IR receiver         |                   |
   |       D0 configured for DEEP_SLEEP      |                   |
-  |               END HW RESET.             |                   |
+  |               AND HW RESET.             |                   |
   | D0      | GPIO16  | 470 Ohm to HW RESET |                   |
   | D7      | GPIO13  | DS18B20             | V5                |
   | Vcc     | Vcc     | Vcc                 |                   |
@@ -146,6 +146,7 @@ char temp_max[5] = "22.2";
 char blynk_token[34] = "YOUR_BLYNK_TOKEN";
 
 float celsius = 0;
+int celsiusOutOfRangeCount = 0; 
 float tempMin = 25;
 float tempMax = 30;
 
@@ -176,6 +177,7 @@ void saveConfig(void);
 //callback notifying us of the need to save config
 void saveConfigCallback (void);
 void CredentialsReset(void);
+void HardwareResetESP(void);
 void connectWifi(void);
 //blink LED tha way it is defined by: count, ton and toff. 
 void blinkLEDBuildin(int count, int ton, int toff);
@@ -264,8 +266,8 @@ void loop()
   if(doTempRun) { doTempRun = false; tempRun();}
   if(doBlynkRun) { doBlynkRun = false; blynkRun();}
   
-  Serial.println("delay 5s");
-  delay(5000);
+//  Serial.println("delay 5s");
+  delay(100);
   //ToDo - check proper way to reduce power consumption (overheating module).
   //wifi_set_sleep_type(MODEM_SLEEP_T);
 }
@@ -329,7 +331,16 @@ void tempRun(void){
   sensors.requestTemperatures(); // Send the command to get temperatures
   Serial.println("DONE");
   celsius = sensors.getTempC(insideThermometer);
-  celsius -= 5; //ToDo - Remove. It is temporary because of soldering DS near wifi module.
+  // check if value is correct. < -50mean there is no sensor or broken.
+  if(celsius < -50) {
+    celsius = 0;
+    //if 10 broken values than reset.
+    if(++celsiusOutOfRangeCount == 10){
+      blinkLEDBuildin(4, 300, 300);
+      HardwareResetESP();
+    }
+  }else celsiusOutOfRangeCount = 0;
+
   Serial.print("Temp C: ");
   Serial.println(celsius);
   
@@ -457,8 +468,7 @@ void connectWifi(){
     Serial.println("failed to connect and hit timeout");
     blinkLEDBuildin(3, 300, 300);
     //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(5000);
+    HardwareResetESP();
   }
 
   //if you get here you have connected to the WiFi
@@ -508,6 +518,16 @@ void CredentialsReset(void)
     WiFiManager wifiManager;
     wifiManager.resetSettings();
     blinkLEDBuildin(5, 300, 300);
+    // Hardware reset.
+    HardwareResetESP();
+}
+
+/*
+ * HardwareResetESP. Require 470 Ohm from GPIO16 to HW RESET.
+ * It works evan after flashing (known issue in ESP).
+ */
+void HardwareResetESP(void)
+{
     // Hardware reset.
     digitalWrite(16, 0);  //GPIO16
     pinMode(16, OUTPUT); //GPIO16  
