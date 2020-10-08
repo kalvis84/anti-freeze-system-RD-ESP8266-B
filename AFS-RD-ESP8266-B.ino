@@ -8,6 +8,10 @@
   Additionaly, temperature can be changed to bigger value if someone want to visit house during
   winter season (heating house after arrival can take several hours).
   
+  Programing Options
+  * Board WEMOS D1 R2 & mini
+  * 1M SPIFS
+  
   WeMos D1 mini Pinout
   https://github.com/esp8266/Arduino/blob/master/variants/d1_mini/pins_arduino.h> 
 
@@ -80,6 +84,8 @@
 #include <FS.h>                   //this needs to be first, or it all crashes and burns...
 
 #include <ESP8266WiFi.h>
+#include "Adafruit_MQTT.h"
+#include "Adafruit_MQTT_Client.h"
 
 //needed for WifiManager library
 #include <DNSServer.h>
@@ -145,10 +151,32 @@ char temp_min[5] = "11.1";
 char temp_max[5] = "22.2";
 char blynk_token[34] = "YOUR_BLYNK_TOKEN";
 
+/*******************MQTT**********************/
+#define MQTT_SERVER      "192.168.0.10"
+#define MQTT_SERVERPORT  1883                   // use 8883 for SSL
+#define MQTT_USERNAME    "admin"
+#define MQTT_PASSWORD    "admin"
+
+WiFiClient client;
+
+// Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
+Adafruit_MQTT_Client mqtt(&client, MQTT_SERVER, MQTT_SERVERPORT, MQTT_USERNAME, MQTT_PASSWORD);
+
+// Setup a topic called 'sh/ac' for publishing.
+Adafruit_MQTT_Publish aircondition = Adafruit_MQTT_Publish(&mqtt, MQTT_USERNAME "/sh/ac");
+
+// Setup a feed called 'onoff' for subscribing to changes.
+//Adafruit_MQTT_Subscribe onoffbutton = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/onoff");
+
+/*******************END MQTT************************/
+
 float celsius = 0;
 int celsiusOutOfRangeCount = 0; 
 float tempMin = 25;
 float tempMax = 30;
+
+//flag for MQTT publishing
+bool doMQTTPublish = false;
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -169,6 +197,10 @@ inline void tempTimer(void){ doTempRun = true;}
 void irRun(void);
 void blynkRun(void);
 void tempRun(void);
+void mqttRun(void);
+
+//connect to MQTT server.
+void MQTT_connect(void);
 
 // read config file from SPIFFS. 
 void readConfig(void); 
@@ -233,6 +265,7 @@ void setup()
   Serial.println();
 
     // set the resolution to 9 bit (Each Dallas/Maxim device is capable of several different resolutions)
+    // 9 mean 0.5°C resolution 
   sensors.setResolution(insideThermometer, 9);
   Serial.print("Device 0 Resolution: ");
   int resolution = sensors.getResolution(insideThermometer);
@@ -265,6 +298,7 @@ void loop()
   if(doIrRun) { doIrRun = false; irRun();}
   if(doTempRun) { doTempRun = false; tempRun();}
   if(doBlynkRun) { doBlynkRun = false; blynkRun();}
+  if(doMQTTPublish) {doMQTTPublish = false; mqttRun();}
   
 //  Serial.println("delay 5s");
   delay(100);
@@ -318,6 +352,7 @@ void irRun(void)
 
 /**************************DS18B20 print temp****************************/
 void tempRun(void){
+  static uint8_t timeToPublishMQTT = 10;
   //  ToDo - take avg of 10.
 
   // method 1 - slower
@@ -353,6 +388,10 @@ void tempRun(void){
     digitalWrite(RELAY_PIN, 1);
     digitalWrite(LEDBLUE_PIN, LED_BLUE_ON);
   }
+
+  //Publish new temperature value
+  if(timeToPublishMQTT) --timeToPublishMQTT;
+  else { timeToPublishMQTT = 10; doMQTTPublish = true; }
 }
 
 // function to print a device address
@@ -379,6 +418,64 @@ void blynkRun(void)
     Blynk.virtualWrite(V3, tempMin);
     Blynk.virtualWrite(V4, tempMax);
   }
+}
+
+void mqttRun(){
+  // Ensure the connection to the MQTT server is alive (this will make the first
+  // connection and automatically reconnect when disconnected).  See the MQTT_connect
+  // function definition further below.
+  char strBuf [128];
+
+  MQTT_connect();
+
+  // Now we can publish stuff!
+  Serial.print(F("\nSending temperature val "));
+  Serial.print(celsius);
+  Serial.print("...");
+
+  sprintf(strBuf, "[{\"temperature\": %2.2lf},{\"sensor_id\": \"AFS-1\", \"location\": \"bedroom\"}]", celsius);
+  if (! aircondition.publish(strBuf)) {
+    Serial.println(F("Failed"));
+  } else {
+    Serial.println(F("OK!"));
+  }
+
+  // ping the server to keep the mqtt connection alive
+  // NOT required if you are publishing once every KEEPALIVE seconds
+  /*
+  if(! mqtt.ping()) {
+    mqtt.disconnect();
+  }
+  */
+  
+}
+
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
+void MQTT_connect() {
+  int8_t ret;
+
+  // Stop if already connected.
+  if (mqtt.connected()) {
+    return;
+  }
+
+  Serial.print("Connecting to MQTT... ");
+
+  uint8_t retries = 3;
+  while ((ret = mqtt.connect()) != 0) { // connect will return 0 for connected
+       Serial.println(mqtt.connectErrorString(ret));
+       Serial.println("Retrying MQTT connection in 5 seconds...");
+       mqtt.disconnect();
+       delay(5000);  // wait 5 seconds
+       retries--;
+       if (retries == 0) {
+         blinkLEDBuildin(2, 300, 300);
+         //reset and try again, or maybe put it to deep sleep
+         HardwareResetESP;
+       }
+  }
+  Serial.println("MQTT Connected!");
 }
 
 void readConfig(void){
